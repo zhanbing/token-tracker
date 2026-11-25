@@ -408,25 +408,12 @@ def _quota_reset_seconds(entry, now):
     return 0
 
 
-def _extract_quota_items(data, now):
-    """从 Antigravity `quota`（或兼容 `rate_limits`）提取最多 2 个代表性配额项：[(label, used_pct, remain_s)]。"""
-    items = []
+def _extract_quota_groups(data, now):
+    """从 Antigravity `quota`（或兼容 `rate_limits`）按模型组提取配额：[(group_label, [(label, used_pct, remain_s)])]。"""
     quota = data.get("quota")
     if isinstance(quota, dict) and quota:
-        model_info = data.get("model")
-        model_id = (model_info.get("id") or model_info.get("name") or "") if isinstance(model_info, dict) else str(model_info or "")
-        ml = model_id.lower()
-        prefer_3p = ml.startswith(("claude", "gpt", "o1", "o3", "o4"))
-
-        def _score(name):
-            nl = name.lower()
-            is_3p = "3p" in nl or "claude" in nl or "gpt" in nl
-            family_match = 0 if (is_3p == prefer_3p) else 1
-            window_rank = 0 if "5h" in nl else 1 if ("week" in nl or "7d" in nl) else 2
-            return (family_match, window_rank, nl)
-
-        picked_windows = set()
-        for bucket_name in sorted(quota, key=_score):
+        grouped = {}
+        for bucket_name in sorted(quota):
             entry = quota.get(bucket_name)
             if not isinstance(entry, dict) or entry.get("disabled"):
                 continue
@@ -439,22 +426,34 @@ def _extract_quota_items(data, now):
             else:
                 continue
             nl = bucket_name.lower()
-            if "5h" in nl:
-                label = "5h"
-            elif "week" in nl or "7d" in nl:
-                label = "7d"
+            if "3p" in nl or "claude" in nl or "gpt" in nl:
+                glabel = "Claude/GPT"
+            elif "gemini" in nl:
+                glabel = "Gemini"
             else:
-                label = bucket_name[:12]
-            if label in picked_windows:
+                glabel = "Limit"
+            if "5h" in nl:
+                label, rank = "5h", 0
+            elif "week" in nl or "7d" in nl:
+                label, rank = "7d", 1
+            else:
+                label, rank = bucket_name[:12], 2
+            bucket = grouped.setdefault(glabel, {})
+            if label not in bucket:
+                bucket[label] = (rank, label, pct, _quota_reset_seconds(entry, now))
+
+        groups = []
+        for glabel in ("Gemini", "Claude/GPT", "Limit"):
+            bucket = grouped.get(glabel)
+            if not bucket:
                 continue
-            picked_windows.add(label)
-            items.append((label, pct, _quota_reset_seconds(entry, now)))
-            if len(items) >= 2:
-                break
-        return items
+            ordered = sorted(bucket.values(), key=lambda x: (x[0], x[1]))[:2]
+            groups.append((glabel, [(lbl, pct, rem) for _, lbl, pct, rem in ordered]))
+        return groups
 
     rl = data.get("rate_limits")
     if isinstance(rl, dict):
+        items = []
         for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
             entry = rl.get(key)
             if not isinstance(entry, dict):
@@ -462,7 +461,9 @@ def _extract_quota_items(data, now):
             pct = entry.get("used_percentage")
             if isinstance(pct, (int, float)) and not isinstance(pct, bool):
                 items.append((label, float(pct), _quota_reset_seconds(entry, now)))
-    return items
+        if items:
+            return [("Limit", items)]
+    return []
 
 
 def render(data, now, transcript_total=0, transcript_cost=0.0, started_at=None):
@@ -514,16 +515,7 @@ def render(data, now, transcript_total=0, transcript_cost=0.0, started_at=None):
     while len(line1) > 1 and vlen(" | ".join(line1)) > W:
         line1.pop()
 
-    # --- Line 2: Limit: 5h | 7d | Ctx ---
-    rl_parts = []
-    for label, pct, remain in _extract_quota_items(data, now):
-        reset_str = f" \033[2m{C['label']}({fmt_duration(remain)}){C['reset']}" if remain > 0 else ""
-        rl_parts.append((
-            f"{C['label']}{label}:{C['reset']}{progress_bar(pct, bar_w)}{reset_str}",
-            f"{C['label']}{label}:{C['reset']}{progress_bar(pct, bar_w)}",
-            f"{C['label']}{label}:{pct:.0f}%{C['reset']}",
-        ))
-
+    # --- Quota Lines (Gemini / Claude/GPT) + Ctx ---
     ctx_parts = []
     used_pct = ctx.get("used_percentage")
     if isinstance(used_pct, (int, float)) and not isinstance(used_pct, bool):
@@ -534,17 +526,30 @@ def render(data, now, transcript_total=0, transcript_cost=0.0, started_at=None):
             f"{C['label']}{prefix}{used_pct:.0f}%{C['reset']}",
         ]
 
-    line2 = []
-    if rl_parts or ctx_parts:
-        for idx in (0, 1, 2):
-            rl_seg = [p[idx] for p in rl_parts]
-            ctx_seg = (ctx_parts[:1] if idx < 2 else ctx_parts[1:2]) if ctx_parts else []
-            segs = rl_seg + ctx_seg
-            if rl_seg:
-                segs[0] = f"{C['label']}Limit:{C['reset']} {segs[0]}"
-            if idx == 2 or vlen(" | ".join(segs)) <= W:
-                line2 = segs
-                break
+    quota_lines = []
+    quota_groups = _extract_quota_groups(data, now)
+    if quota_groups:
+        for g_idx, (group_label, group_items) in enumerate(quota_groups):
+            rl_parts = []
+            for label, pct, remain in group_items:
+                reset_str = f" \033[2m{C['label']}({fmt_duration(remain)}){C['reset']}" if remain > 0 else ""
+                rl_parts.append((
+                    f"{C['label']}{label}:{C['reset']}{progress_bar(pct, bar_w)}{reset_str}",
+                    f"{C['label']}{label}:{C['reset']}{progress_bar(pct, bar_w)}",
+                    f"{C['label']}{label}:{pct:.0f}%{C['reset']}",
+                ))
+            attach_ctx = ctx_parts if g_idx == 0 else []
+            for idx in (0, 1, 2):
+                rl_seg = [p[idx] for p in rl_parts]
+                ctx_seg = (attach_ctx[:1] if idx < 2 else attach_ctx[1:2]) if attach_ctx else []
+                segs = rl_seg + ctx_seg
+                if rl_seg:
+                    segs[0] = f"{C['label']}{group_label}:{C['reset']} {segs[0]}"
+                if idx == 2 or vlen(" | ".join(segs)) <= W:
+                    quota_lines.append(segs)
+                    break
+    elif ctx_parts:
+        quota_lines.append([ctx_parts[0] if vlen(ctx_parts[0]) <= W else ctx_parts[1]])
 
     # --- Line 3: Tokens（上下文窗口 / 本轮 in, out, cache 构成）---
     line3 = []
@@ -595,7 +600,7 @@ def render(data, now, transcript_total=0, transcript_cost=0.0, started_at=None):
     while len(line4) > 1 and vlen(" | ".join(line4)) > W:
         line4.pop()
 
-    output = [" | ".join(line) for line in (line1, line2, line3, line4) if line]
+    output = [" | ".join(line) for line in [line1, *quota_lines, line3, line4] if line]
     if output:
         print("\n".join(output))
         sys.stdout.flush()

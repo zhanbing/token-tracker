@@ -247,3 +247,6 @@ def test_load_rate_limits_from_antigravity_status_file(tmp_path, monkeypatch):
     assert rl.model == "Gemini 3.6 Flash"
     assert rl.five_hour_pct == 25.0
     assert rl.seven_day_pct == 0.0  # 过期窗口归零，且优先选了 gemini 桶而非 3p 桶
+    assert [g.label for g in rl.groups] == ["Gemini", "Claude/GPT"]
+    assert rl.groups[0].five_hour_pct == 25.0 and rl.groups[0].seven_day_pct == 0.0
+    assert rl.groups[1].seven_day_pct == 90.0

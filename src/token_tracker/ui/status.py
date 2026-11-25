@@ -110,8 +110,17 @@ def _render_limits(rate_limits: dict, per_agent: dict) -> None:
         table.add_column("", min_width=20)
         table.add_column("", justify="right", style=_S.dim)
         now_ts = datetime.now(UTC).timestamp()
-        for label, pct, resets in (("5h", rl.five_hour_pct, rl.five_hour_resets_at),
-                                   ("7d", rl.seven_day_pct, rl.seven_day_resets_at)):
+        rows: list[tuple[str, float | None, int | None]] = []
+        if rl.groups:
+            for grp in rl.groups:
+                rows.append((f"{grp.label} 5h", grp.five_hour_pct, grp.five_hour_resets_at))
+                rows.append((f"{grp.label} 7d", grp.seven_day_pct, grp.seven_day_resets_at))
+        else:
+            rows = [
+                ("5h", rl.five_hour_pct, rl.five_hour_resets_at),
+                ("7d", rl.seven_day_pct, rl.seven_day_resets_at),
+            ]
+        for label, pct, resets in rows:
             if pct is None:
                 continue
             # reset 已过期（window 已滚但本次启动没拿到新数据）→ 显示 `reset --`，避免误导

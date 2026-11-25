@@ -1799,15 +1799,16 @@ def test_antigravity_statusline_render_incremental_cache_and_terminal_map(tmp_pa
     assert r1.returncode == 0
     plain1 = re.sub(r"\x1b\[[0-9;]*m", "", r1.stdout)
     lines = plain1.strip().splitlines()
-    assert len(lines) == 4
+    assert len(lines) == 5
     assert "[demo-repo](main*)" in lines[0]
     assert "Total: 12k" in lines[0] and "Cost: $1.25" in lines[0]
-    assert "Limit:" in lines[1] and "5h:" in lines[1] and "30%" in lines[1]
-    assert "7d:" in lines[1] and "15%" in lines[1]  # 命中 gemini 桶，非 3p 桶(90%)
+    assert "Gemini:" in lines[1] and "5h:" in lines[1] and "30%" in lines[1]
+    assert "7d:" in lines[1] and "15%" in lines[1]
     assert "1.0M Ctx:" in lines[1] and "22%" in lines[1]
-    assert "Tokens: in 10k, out 500, cache 2k" in lines[2]
-    assert "Model: Gemini 3.6 Flash/high/auto" in lines[3]
-    assert "Duration: 2min" in lines[3] and "Plan: Google AI Pro" in lines[3]
+    assert "Claude/GPT:" in lines[2] and "7d:" in lines[2] and "90%" in lines[2]
+    assert "Tokens: in 10k, out 500, cache 2k" in lines[3]
+    assert "Model: Gemini 3.6 Flash/high/auto" in lines[4]
+    assert "Duration: 2min" in lines[4] and "Plan: Google AI Pro" in lines[4]
 
     # 追加一条新 step，验证按 offset 增量累计（12,500 + 2,500 = 15,000 → 15k）
     with open(transcript, "a", encoding="utf-8") as f:

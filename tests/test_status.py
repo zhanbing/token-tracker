@@ -2,7 +2,7 @@ import contextlib
 from datetime import UTC, datetime, timedelta
 
 from token_tracker import cli
-from token_tracker.adapters.types import AgentInfo, RateLimits, SessionStats, StatusSummary, UsageEntry
+from token_tracker.adapters.types import AgentInfo, QuotaGroup, RateLimits, SessionStats, StatusSummary, UsageEntry
 from token_tracker.ui.console import capture_console
 from token_tracker.ui.status import render_status
 
@@ -150,6 +150,31 @@ def test_render_status_no_limits_shows_agent_stats(monkeypatch):
     assert "Claude Code" in out and "Codex" in out and "Antigravity" in out
     assert "AGY" in out                        # session Agent 列短名
     assert "Rate Limits" not in out            # 不显示额度段
+
+
+def test_render_status_antigravity_grouped_limits(monkeypatch):
+    monkeypatch.setattr("token_tracker.ui.status.forced_color_console", contextlib.nullcontext)
+    summary = StatusSummary(total_tokens=1000, cost_usd=1.5, message_count=5, session_count=1)
+    rl = {
+        "antigravity": RateLimits(
+            five_hour_pct=24.0,
+            seven_day_pct=26.0,
+            model="Gemini 4 Hydrogen",
+            groups=[
+                QuotaGroup(label="Gemini", five_hour_pct=24.0, seven_day_pct=26.0),
+                QuotaGroup(label="Claude/GPT", five_hour_pct=5.0, seven_day_pct=12.0),
+            ],
+        )
+    }
+    per_agent = {"antigravity": StatusSummary(total_tokens=1000, cost_usd=1.5)}
+
+    with capture_console(160) as buf:
+        render_status(summary, per_agent, rl, [], ["Antigravity"])
+    out = buf.getvalue()
+
+    assert "Antigravity" in out
+    assert "Gemini 5h" in out and "Gemini 7d" in out
+    assert "Claude/GPT 5h" in out and "Claude/GPT 7d" in out
 
 
 def test_system_tz_falls_back_on_errors(monkeypatch):

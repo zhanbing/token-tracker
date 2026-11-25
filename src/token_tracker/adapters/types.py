@@ -136,6 +136,15 @@ class MonthlyStats:
 
 
 @dataclass
+class QuotaGroup:
+    label: str
+    five_hour_pct: float | None = None
+    five_hour_resets_at: int | None = None
+    seven_day_pct: float | None = None
+    seven_day_resets_at: int | None = None
+
+
+@dataclass
 class RateLimits:
     five_hour_pct: float | None = None
     five_hour_resets_at: int | None = None
@@ -144,6 +153,7 @@ class RateLimits:
     model: str = ""
     plan_type: str = ""
     context_window: int | None = None
+    groups: list[QuotaGroup] = field(default_factory=list)
 
 
 @dataclass

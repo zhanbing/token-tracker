@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from .types import AgentInfo, RateLimits, UsageEntry, normalize_pct
+from .types import AgentInfo, QuotaGroup, RateLimits, UsageEntry, normalize_pct
 from .util import (
     antigravity_home,
     file_may_have_events_since,
@@ -316,17 +316,14 @@ def load_rate_limits() -> RateLimits | None:
 
     five_pct = seven_pct = None
     five_reset = seven_reset = None
+    groups: list[QuotaGroup] = []
 
     quota = data.get("quota")
     if isinstance(quota, dict) and quota:
         prefer_3p = str(model_id).lower().startswith(("claude", "gpt", "o1", "o3", "o4"))
+        bucket_groups: dict[str, QuotaGroup] = {}
 
-        def _score(name: str) -> tuple[int, str]:
-            nl = name.lower()
-            is_3p = "3p" in nl or "claude" in nl or "gpt" in nl
-            return (0 if is_3p == prefer_3p else 1, nl)
-
-        for bucket_name in sorted(quota, key=_score):
+        for bucket_name in sorted(quota):
             entry = quota.get(bucket_name)
             if not isinstance(entry, dict) or entry.get("disabled"):
                 continue
@@ -334,12 +331,29 @@ def load_rate_limits() -> RateLimits | None:
             if pct is None:
                 continue
             nl = bucket_name.lower()
-            if "5h" in nl and five_pct is None:
-                five_reset = _reset_epoch(entry, received_ts)
-                five_pct = normalize_pct(pct, five_reset, now_ts)
-            elif ("week" in nl or "7d" in nl) and seven_pct is None:
-                seven_reset = _reset_epoch(entry, received_ts)
-                seven_pct = normalize_pct(pct, seven_reset, now_ts)
+            if "3p" in nl or "claude" in nl or "gpt" in nl:
+                glabel = "Claude/GPT"
+            elif "gemini" in nl:
+                glabel = "Gemini"
+            else:
+                glabel = "Limit"
+            grp = bucket_groups.setdefault(glabel, QuotaGroup(label=glabel))
+            if "5h" in nl and grp.five_hour_pct is None:
+                grp.five_hour_resets_at = _reset_epoch(entry, received_ts)
+                grp.five_hour_pct = normalize_pct(pct, grp.five_hour_resets_at, now_ts)
+            elif ("week" in nl or "7d" in nl) and grp.seven_day_pct is None:
+                grp.seven_day_resets_at = _reset_epoch(entry, received_ts)
+                grp.seven_day_pct = normalize_pct(pct, grp.seven_day_resets_at, now_ts)
+
+        for glabel in ("Gemini", "Claude/GPT", "Limit"):
+            maybe_grp = bucket_groups.get(glabel)
+            if maybe_grp and (maybe_grp.five_hour_pct is not None or maybe_grp.seven_day_pct is not None):
+                groups.append(maybe_grp)
+
+        primary = bucket_groups.get("Claude/GPT" if prefer_3p else "Gemini") or (groups[0] if groups else None)
+        if primary is not None:
+            five_pct, five_reset = primary.five_hour_pct, primary.five_hour_resets_at
+            seven_pct, seven_reset = primary.seven_day_pct, primary.seven_day_resets_at
     else:
         rl = data.get("rate_limits")
         if isinstance(rl, dict):
@@ -352,7 +366,7 @@ def load_rate_limits() -> RateLimits | None:
                 seven_reset = _reset_epoch(seven, received_ts)
                 seven_pct = normalize_pct(_used_pct(seven), seven_reset, now_ts)
 
-    if five_pct is None and seven_pct is None:
+    if five_pct is None and seven_pct is None and not groups:
         return None
     return RateLimits(
         five_hour_pct=five_pct,
@@ -360,4 +374,5 @@ def load_rate_limits() -> RateLimits | None:
         seven_day_pct=seven_pct,
         seven_day_resets_at=seven_reset,
         model=str(model_name),
+        groups=groups,
     )
