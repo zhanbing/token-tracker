@@ -62,6 +62,7 @@ _OFFICIAL_PROVIDER_PREFIXES = (
     ("qwen", ("dashscope/",)),
     ("kimi-", ("moonshot/",)),
     ("minimax-", ("minimax/",)),
+    ("gemini-", ("gemini/",)),
 )
 
 _DEEPSEEK_NEW_PRICING_AT = datetime(2026, 8, 16, 16, 0, tzinfo=UTC)
@@ -75,7 +76,10 @@ _DEEPSEEK_HOLIDAYS = (
     (date(2026, 10, 1), date(2026, 10, 7)),
 )
 _GEMINI_FLASH_PRICE_CHANGE_AT = datetime(2027, 1, 1, tzinfo=UTC)
-_GEMINI_FLASH_MODELS = {"gemini-3.6-flash", "gemini-3.8-flash"}
+_GEMINI_FLASH_MODELS = {"gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"}
+# Gemini 4 Argon / Carbon 导入价持续到 2026-11-30，$2/$10/$0.10；2026-12-01 UTC 起恢复标准价 $4/$20/$0.20。
+_GEMINI_4_INTRO_PRICE_CHANGE_AT = datetime(2026, 12, 1, tzinfo=UTC)
+_GEMINI_4_INTRO_MODELS = {"gemini-4-argon", "gemini-4-carbon"}
 _DEEPSEEK_V41_FLASH_MODELS = {
     "deepseek-flash",
     "deepseek-v4-flash",
@@ -180,12 +184,16 @@ def _calculate_tokens(
     cache_read_tokens: int,
     prompt_tokens: int | None,
 ) -> float:
+    bare_key = model_key.lower().removeprefix("gemini/")
     if model_key.lower() in _DEEPSEEK_V4_PRICING_KEYS:
         info = _deepseek_pricing(model, timestamp)
-    elif model_key in _GEMINI_FLASH_MODELS:
+    elif bare_key in _GEMINI_FLASH_MODELS:
         ts = timestamp if timestamp.tzinfo is not None else timestamp.replace(tzinfo=UTC)
         # 官方公告的时间切价独立于当前缓存，历史请求不会被未来的在线价重算。
         info = _usd(1.5, 7.5, 0.15) if ts >= _GEMINI_FLASH_PRICE_CHANGE_AT else _usd(0.75, 3.75, 0.075)
+    elif bare_key in _GEMINI_4_INTRO_MODELS:
+        ts = timestamp if timestamp.tzinfo is not None else timestamp.replace(tzinfo=UTC)
+        info = _usd(4.0, 20.0, 0.2) if ts >= _GEMINI_4_INTRO_PRICE_CHANGE_AT else _usd(2.0, 10.0, 0.1)
 
     info = _select_tiered_pricing(info, prompt_tokens)
     if "tiered_pricing" in info and ("input_cost_per_token" not in info or "output_cost_per_token" not in info):
@@ -339,7 +347,8 @@ def _resolve_model_key_uncached(model: str, pricing: dict) -> str | None:
     if namespace in ("chatgpt", "openai") and bare_model.startswith("gpt-") and "/" not in bare_model:
         return _resolve_model_key_uncached(bare_model, pricing)
 
-    # 官方 provider 前缀补全：例如 bare `grok-4.6` → LiteLLM 的 `xai/grok-4.6`。
+    # 官方 provider 前缀补全：例如 bare `grok-4.6` → LiteLLM 的 `xai/grok-4.6`，
+    # 或 `gemini-4-foo-xhigh` → LiteLLM 的 `gemini/gemini-4-foo`（严格 "-" 锚点最长前缀匹配）。
     for model_prefix, providers in _OFFICIAL_PROVIDER_PREFIXES:
         if not ml.startswith(model_prefix):
             continue
@@ -348,6 +357,15 @@ def _resolve_model_key_uncached(model: str, pricing: dict) -> str | None:
             for key in pricing:
                 if key.lower() == target:
                     return key
+            provider_prefix_keys = [
+                k for k in pricing
+                if (kl := k.lower()).startswith(provider)
+                and kl != target
+                and target.startswith(kl)
+                and target[len(kl)] == "-"
+            ]
+            if provider_prefix_keys:
+                return max(provider_prefix_keys, key=len)
 
     # 同系列兜底：未知的新 Claude 模型（litellm 收录滞后）退回同系列最新已知价，避免成本静默归零
     for prefix, fallback_key in _FAMILY_FALLBACK:
@@ -772,9 +790,24 @@ def _fallback_pricing() -> dict:
         "mimo-v2.6-pro": _cny(3, 6, 0.025),
         "mimo-v2.6-flash": _cny(1, 2, 0.02),
         # https://ai.google.dev/gemini-api/docs/pricing
-        # 当前生效价；2027-01-01 翻倍按请求时间在 _calculate_tokens 中处理。
+        # Gemini 4 系列：统一 1M 上下文，隐式缓存 95% 折扣（读取按输入 5%）；
+        # Argon / Carbon 导入价持续至 2026-11-30，2026-12-01 UTC 起翻倍，按请求时间在 _calculate_tokens 处理。
+        "gemini-4-argon": _usd(2.0, 10.0, 0.1),
+        "gemini-4-carbon": _usd(2.0, 10.0, 0.1),
+        "gemini-4-neon": _usd(3.0, 15.0, 0.15),
+        "gemini-4-hydrogen": _usd(1.5, 7.5, 0.075),
+        # Gemini 3 系列：3.6 / 3.7 / 3.8 Flash 当前为导入价，2027-01-01 UTC 翻倍按请求时间处理；
+        # 3.1 Pro Preview / 3.5 Flash 补齐离线底座（3.1 Pro 超过 200K 进入长上下文档）。
         "gemini-3.6-flash": _usd(0.75, 3.75, 0.075),
+        "gemini-3.7-flash": _usd(0.75, 3.75, 0.075),
         "gemini-3.8-flash": _usd(0.75, 3.75, 0.075),
+        "gemini-3.5-flash": _usd(1.5, 9.0, 0.15),
+        "gemini-3.1-pro-preview": {
+            **_usd(2.0, 12.0, 0.2),
+            "input_cost_per_token_above_200k_tokens": 4.0e-6,
+            "output_cost_per_token_above_200k_tokens": 18.0e-6,
+            "cache_read_input_token_cost_above_200k_tokens": 0.4e-6,
+        },
         # xAI Grok（docs.x.ai 官方 USD）。2026-05-15 退役潮：grok-4-fast/4.1-fast/grok-3 路由到 grok-4.3，
         # grok-code-fast-1 退役为 grok-build-0.1 别名（退役 slug 靠 _FAMILY_FALLBACK 接住）。
         "grok-4.3": {

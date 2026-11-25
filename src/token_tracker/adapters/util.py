@@ -33,6 +33,16 @@ def kimi_home() -> str:
     return os.path.expanduser("~/.kimi-code")
 
 
+def antigravity_home() -> str:
+    """Antigravity 配置/数据根目录：`ANTIGRAVITY_APP_DATA_DIR` / `ANTIGRAVITY_HOME` / `AGY_HOME` 优先，
+    否则 `~/.gemini/antigravity-cli`。官方支持环境变量覆盖位置；Windows 下 `~` 经 expanduser 解析到 `%USERPROFILE%`。"""
+    for var in ("ANTIGRAVITY_APP_DATA_DIR", "ANTIGRAVITY_HOME", "AGY_HOME"):
+        env = os.environ.get(var, "").strip()
+        if env:
+            return env
+    return os.path.expanduser("~/.gemini/antigravity-cli")
+
+
 def iter_jsonl_dicts(path: Path | str) -> Iterator[dict]:
     """逐行读取 JSONL，只 yield dict 行。
 

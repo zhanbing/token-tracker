@@ -135,15 +135,20 @@ def test_render_status_no_limits_shows_agent_stats(monkeypatch):
     per_agent = {
         "claude-code": StatusSummary(total_tokens=800, cost_usd=1.0, message_count=3, session_count=1),
         "codex": StatusSummary(total_tokens=200, cost_usd=0.5, message_count=2, session_count=1),
+        "antigravity": StatusSummary(total_tokens=150, cost_usd=0.2, message_count=1, session_count=1),
     }
-    sessions = [_session("s1", "claude-code", "claude-opus-4-8", now, 10, 800, 1.0, 3)]
+    sessions = [
+        _session("s1", "claude-code", "claude-opus-4-8", now, 10, 800, 1.0, 3),
+        _session("s2", "antigravity", "gemini-3.6-flash", now, 8, 150, 0.2, 1),
+    ]
 
     with capture_console(160) as buf:
-        render_status(summary, per_agent, {}, sessions, ["Claude Code", "Codex"])
+        render_status(summary, per_agent, {}, sessions, ["Claude Code", "Codex", "Antigravity"])
     out = buf.getvalue()
 
     assert "Today by Agent" in out             # 无额度 → per-agent 统计段
-    assert "Claude Code" in out and "Codex" in out
+    assert "Claude Code" in out and "Codex" in out and "Antigravity" in out
+    assert "AGY" in out                        # session Agent 列短名
     assert "Rate Limits" not in out            # 不显示额度段
 
 

@@ -426,6 +426,7 @@ def test_scan_sessions_caps_at_max_sessions(monkeypatch):
     monkeypatch.setattr(sidebar, "_scan_claude_sessions", lambda *a, **k: fake)
     monkeypatch.setattr(sidebar, "_scan_codex_sessions", lambda *a, **k: [])
     monkeypatch.setattr(sidebar, "_scan_kimi_sessions", lambda *a, **k: [])  # 不读真实 ~/.kimi-code
+    monkeypatch.setattr(sidebar, "_scan_antigravity_sessions", lambda *a, **k: [])  # 不读真实 ~/.gemini
     got = sidebar.scan_sessions()
     assert len(got) == 10
     assert [s.session_id for s in got] == [f"s{i}" for i in range(10)]  # 最新的 10 个
@@ -1167,3 +1168,106 @@ def test_kimi_scan_truncates_prompts_and_falls_back_to_wd_name(tmp_path):
     got = _scan_kimi(sessions_dir, max_prompts=1)
     assert got[0].project == "myproj"
     assert [p.text for p in got[0].prompts] == ["第二条"]
+
+
+# --- Antigravity sidebar ---
+
+
+def _write_antigravity_session(brain_dir: Path, cid: str, rows: list[dict],
+                               workspace_uri: str | None = None) -> Path:
+    path = brain_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(path, rows)
+    if workspace_uri is not None:
+        import sqlite3
+        db = brain_dir.parent / "conversation_summaries.db"
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id TEXT, workspace_uris TEXT)"
+            )
+            conn.execute("DELETE FROM conversation_summaries WHERE conversation_id = ?", (cid,))
+            conn.execute(
+                "INSERT INTO conversation_summaries (conversation_id, workspace_uris) VALUES (?, ?)",
+                (cid, json.dumps([workspace_uri])),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return path
+
+
+def _scan_antigravity(brain_dir: Path, max_prompts: int | None = 3) -> list[LiveSession]:
+    now = datetime.now(UTC)
+    return sidebar._scan_antigravity_sessions(now - timedelta(hours=5), now, None, max_prompts,
+                                              sessions_dir=str(brain_dir))
+
+
+def test_antigravity_scan_extracts_prompts_model_project_and_reply(tmp_path):
+    brain_dir = tmp_path / "brain"
+    proj = tmp_path / "agy-proj"
+    (proj / ".git").mkdir(parents=True)
+    _write_antigravity_session(brain_dir, "conv-1", [
+        {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "created_at": _iso(180),
+         "content": "<USER_REQUEST>\n理解下这个项目\n</USER_REQUEST>\n<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>"},
+        {"step_index": 1, "source": "USER_EXPLICIT", "type": "USER_INPUT", "created_at": _iso(170),
+         "content": "<USER_REQUEST>\n/compact\n</USER_REQUEST>"},  # slash 命令过滤
+        {"step_index": 2, "source": "USER_EXPLICIT", "type": "USER_INPUT", "created_at": _iso(160),
+         "content": "<USER_REQUEST>\n/Users/me/app.py 看看这个文件\n</USER_REQUEST>"},  # 路径开头不误杀
+        {"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE", "created_at": _iso(120),
+         "model": "gemini-3.6-flash", "content": "已完成检查。\n\n要我继续补单测吗？"},
+    ], workspace_uri=f"file://{proj}")
+
+    got = _scan_antigravity(brain_dir)
+    assert len(got) == 1
+    s = got[0]
+    assert s.agent_id == "antigravity"
+    assert s.session_id == "conv-1"
+    assert s.project == "agy-proj"
+    assert s.model == "gemini-3.6-flash"
+    assert [p.text for p in s.prompts] == ["理解下这个项目", "/Users/me/app.py 看看这个文件"]
+    assert s.state == WAITING
+    assert "补单测" in s.next_hint
+
+
+def test_antigravity_scan_pending_tool_ask_question_and_quoted_project_fallback(tmp_path):
+    brain_dir = tmp_path / "brain"
+    proj = tmp_path / "fallback-proj"
+    (proj / ".git").mkdir(parents=True)
+    target_file = proj / "README.md"
+    target_file.write_text("hi\n", encoding="utf-8")
+
+    rows = [
+        {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "created_at": _iso(120),
+         "content": "<USER_REQUEST>\n帮我选方案\n</USER_REQUEST>"},
+        {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "created_at": _iso(90),
+         "model": "gemini-3.6-flash", "tool_calls": [
+             {"name": "read_file", "args": {"Path": json.dumps(str(target_file))}},
+             {"name": "ask_question", "args": {
+                 "questions": json.dumps([{"question": "继续哪个方向？", "options": ["方案 A", "方案 B"]}]),
+             }},
+         ]},
+    ]
+    _write_antigravity_session(brain_dir, "conv-q", rows)
+    got = _scan_antigravity(brain_dir)
+    assert len(got) == 1
+    assert got[0].project == "fallback-proj"
+    assert got[0].state == ATTENTION
+    assert got[0].next_hint == "继续哪个方向？\n· 方案 A / 方案 B"
+
+    # 收到新的最终回复后退出 pending_tool 且刷新 next_hint
+    rows.append({"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE",
+                 "created_at": _iso(60), "model": "gemini-3.6-flash", "content": "已按方案 A 执行。"})
+    _write_antigravity_session(brain_dir, "conv-q", rows)
+    got2 = _scan_antigravity(brain_dir)
+    assert got2[0].state == WAITING
+    assert got2[0].next_hint == "已按方案 A 执行。"
+
+
+def test_antigravity_scan_filters_old_event_even_with_fresh_mtime(tmp_path):
+    brain_dir = tmp_path / "brain"
+    _write_antigravity_session(brain_dir, "conv-old", [
+        {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+         "created_at": _iso(8 * 3600), "content": "<USER_REQUEST>\n旧会话\n</USER_REQUEST>"},
+    ])
+    assert _scan_antigravity(brain_dir) == []

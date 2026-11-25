@@ -5,8 +5,8 @@ from rich.text import Text
 from .console import get_console
 from .theme import _S
 
-AGENT_SHORT = {"claude-code": "Claude", "codex": "Codex", "kimi": "Kimi"}
-AGENT_LABEL = {"claude-code": "Claude Code", "codex": "Codex", "kimi": "Kimi Code"}
+AGENT_SHORT = {"claude-code": "Claude", "codex": "Codex", "kimi": "Kimi", "antigravity": "AGY"}
+AGENT_LABEL = {"claude-code": "Claude Code", "codex": "Codex", "kimi": "Kimi Code", "antigravity": "Antigravity"}
 
 MODEL_SHORT = {
     "claude-fable-5-1": "Fable 5.1",
@@ -86,7 +86,11 @@ MODEL_SHORT = {
     "mimo-v2.5": "MiMo V2.5",
     "mimo-v2.6-pro": "MiMo V2.6P",
     "mimo-v2.6-flash": "MiMo V2.6F",
-    # Gemini（3.6 / 3.8 Flash 同时有内置离线价，其余沿用在线表）
+    # Gemini（4 系列与 3.x 主流均已补离线价）
+    "gemini-4-argon": "Gemini 4 Argon",
+    "gemini-4-carbon": "Gemini 4 Carbon",
+    "gemini-4-neon": "Gemini 4 Neon",
+    "gemini-4-hydrogen": "Gemini 4 Hydro",
     "gemini-2.5-pro": "Gemini 2.5 Pro",
     "gemini-2.5-flash": "Gemini 2.5 Flash",
     "gemini-3-pro-preview": "Gemini 3 Pro",
@@ -95,6 +99,7 @@ MODEL_SHORT = {
     "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
     "gemini-3.5-flash": "Gemini 3.5 Flash",
     "gemini-3.6-flash": "Gemini 3.6 Flash",
+    "gemini-3.7-flash": "Gemini 3.7 Flash",
     "gemini-3.7-pro": "Gemini 3.7 Pro",
     "gemini-3.8-flash": "Gemini 3.8 Flash",
     "gemini-2.0-flash": "Gemini 2.0 Flash",
@@ -117,12 +122,22 @@ def _width_mode() -> str:
     return "wide"
 
 
+_EFFORT_SUFFIXES = ("-xhigh", "-high", "-medium", "-low", "-max", "-thinking")
+
+
 def _model_short(model: str) -> str:
     if model in MODEL_SHORT:
         return MODEL_SHORT[model]
-    if "/" in model:
-        return model.split("/")[-1][:16]
-    return model[:16]
+    base = model.split("/")[-1] if "/" in model else model
+    if base in MODEL_SHORT:
+        return MODEL_SHORT[base]
+    lower = base.lower()
+    for suffix in _EFFORT_SUFFIXES:
+        if lower.endswith(suffix):
+            trimmed = base[:-len(suffix)]
+            if trimmed in MODEL_SHORT:
+                return MODEL_SHORT[trimmed]
+    return base[:16]
 
 
 def _fmt_tokens(n: int) -> str:

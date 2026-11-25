@@ -9,6 +9,9 @@
 - Kimi wire jsonl（`~/.kimi-code/sessions/<wd_*>/<session_*>/agents/main/wire.jsonl`）——
   `turn.prompt`（origin.kind=="user"）是提示词来源；`usage.record` 给模型；
   `tool.call`/`tool.result` 配对判 pending；项目名取自同目录 state.json 的 cwd（兼容旧版 workDir）。
+- Antigravity transcript jsonl（`~/.gemini/antigravity-cli/brain/<cid>/.system_generated/logs/transcript.jsonl`）——
+  `USER_INPUT`/`USER_EXPLICIT` 抽 `<USER_REQUEST>` 作提示词；`PLANNER_RESPONSE` 给模型、工具状态与回复；
+  项目名优先读 `conversation_summaries.db`，缺失时从 `tool_calls` 参数回退。
 - 心跳 `config.STATUS_FILE`（CC statusline 每帧落盘）——`session_id` + `_received_at`
   判「正在跑」，白拿、零新增开销；Codex Stop hook 的终端定位单独落
   `config.TERMINAL_MAP_FILE`，读取时与 CC status 文件里的映射合并。
@@ -28,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import config
+from .adapters import antigravity as antigravity_adapter
 from .adapters import claude as claude_adapter
 from .adapters import codex as codex_adapter
 from .adapters.util import (
@@ -149,6 +153,18 @@ class _KimiParseState:
     last_event: datetime | None = None
 
 
+@dataclass
+class _AntigravityParseState:
+    session_id: str
+    project: str = "unknown"
+    prompts: list[Prompt] = field(default_factory=list)
+    pending_tool: bool = False
+    pending_question: str = ""
+    model: str = ""
+    last_reply: str = ""
+    last_event: datetime | None = None
+
+
 # 按 (path, max_prompts) → (mtime_ns, size, result) 缓存：相同条数且文件未变才复用。
 # 解析结果已经按 max_prompts 截断（None 表示保留全部），参数必须进 key，避免先查 2 条后
 # 再查 5 条或全部时仍只返回 2 条。
@@ -172,6 +188,8 @@ def scan_sessions(hours_back: int = DEFAULT_HOURS_BACK,
         sessions.extend(_scan_codex_sessions(cutoff, now, heartbeat, max_prompts, term_map=term_map))
     if agent_ids is None or "kimi" in agent_ids:
         sessions.extend(_scan_kimi_sessions(cutoff, now, heartbeat, max_prompts, term_map=term_map))
+    if agent_ids is None or "antigravity" in agent_ids:
+        sessions.extend(_scan_antigravity_sessions(cutoff, now, heartbeat, max_prompts, term_map=term_map))
     sessions.sort(key=lambda s: s.last_activity, reverse=True)
     return sessions[:max_sessions]
 
@@ -780,6 +798,143 @@ def _consume_kimi_loop_event(event: dict, state: _KimiParseState) -> None:
             state.pending_calls.discard(call_id)
 
 
+# --- Antigravity ---
+
+def _scan_antigravity_sessions(cutoff: datetime, now: datetime,
+                               heartbeat: tuple[str, datetime] | None,
+                               max_prompts: int | None,
+                               sessions_dir: str | None = None,
+                               term_map: dict[str, dict] | None = None) -> list[LiveSession]:
+    """扫描 `<antigravity_home>/brain/<conversation_id>/.system_generated/logs/transcript.jsonl`。
+    sessions_dir 供测试注入。"""
+    term_map = term_map or {}
+    base = Path(sessions_dir) if sessions_dir is not None else Path(antigravity_adapter.BRAIN_DIR)
+    try:
+        if not base.is_dir():
+            return []
+    except OSError:
+        return []
+    db_path = (Path(sessions_dir).parent / "conversation_summaries.db"
+               if sessions_dir is not None else Path(antigravity_adapter.CONVERSATION_SUMMARIES_DB))
+    workspaces = antigravity_adapter.load_conversation_workspaces(db_path)
+    sessions: list[LiveSession] = []
+    seen: set[str] = set()
+    try:
+        paths = list(base.glob("*/.system_generated/logs/transcript.jsonl"))
+    except OSError:
+        return []
+    for path in paths:
+        mtime, stamp, parsed = _cache_get(path, max_prompts)
+        if mtime <= 0:
+            continue
+        mtime_dt = datetime.fromtimestamp(mtime, UTC)
+        if mtime_dt < cutoff:
+            continue
+        if parsed is None:
+            parsed = _parse_antigravity(path, max_prompts, workspaces)
+            if parsed is None:
+                continue
+            if stamp is not None:
+                _cache_put(path, max_prompts, parsed, stamp)
+        if not parsed.prompts or parsed.session_id in seen:
+            continue
+        last_activity = parsed.last_event or mtime_dt
+        if last_activity < cutoff:
+            continue
+        seen.add(parsed.session_id)
+        sessions.append(LiveSession(
+            agent_id="antigravity",
+            session_id=parsed.session_id,
+            project=parsed.project,
+            last_activity=last_activity,
+            state=_infer_state(now, last_activity, parsed.pending_tool,
+                               _heartbeat_fresh(heartbeat, parsed.session_id, now)),
+            prompts=parsed.prompts,
+            model=parsed.model,
+            terminal=term_map.get(parsed.session_id) or {},
+            next_hint=parsed.next_hint,
+        ))
+    return sessions
+
+
+def _antigravity_question(tool_calls: object) -> str:
+    """提取 Antigravity `ask_question` 工具调用里的结构化提问（args.questions 可能是 JSON 字符串或列表）。"""
+    if not isinstance(tool_calls, list):
+        return ""
+    for call in tool_calls:
+        if not isinstance(call, dict) or call.get("name") != "ask_question":
+            continue
+        args = call.get("args")
+        if not isinstance(args, dict):
+            continue
+        raw_questions = args.get("questions")
+        if isinstance(raw_questions, str):
+            try:
+                raw_questions = json.loads(raw_questions)
+            except json.JSONDecodeError:
+                continue
+        question = _format_question({"questions": raw_questions})
+        if question:
+            return question
+    return ""
+
+
+def _parse_antigravity(path: Path, max_prompts: int | None, workspaces: dict[str, str]) -> _Parsed | None:
+    session_id = path.parents[2].name if len(path.parents) >= 3 else path.parent.name
+    project = workspaces.get(session_id) or "unknown"
+    state = _AntigravityParseState(session_id=session_id, project=project)
+    for data in iter_jsonl_dicts(path):
+        ts = _parse_ts(data.get("created_at"))
+        if ts is not None:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if state.last_event is None or ts > state.last_event:
+                state.last_event = ts
+
+        dtype = data.get("type")
+        source = data.get("source")
+
+        if dtype == "USER_INPUT" or source == "USER_EXPLICIT":
+            raw = data.get("content", "")
+            if isinstance(raw, str):
+                m = re.search(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", raw, re.DOTALL)
+                text = m.group(1).strip() if m else raw.strip()
+                if text and not _SLASH_COMMAND_RE.match(text) and not text.startswith("<"):
+                    state.prompts.append(Prompt(text=text, timestamp=ts))
+                    state.pending_tool = False
+                    state.pending_question = ""
+                    state.last_reply = ""
+        elif source == "MODEL":
+            m_name = data.get("model")
+            if isinstance(m_name, str) and m_name:
+                state.model = m_name
+            tool_calls = data.get("tool_calls")
+            if tool_calls:
+                state.pending_tool = True
+                state.last_reply = ""
+                question = _antigravity_question(tool_calls)
+                if question:
+                    state.pending_question = question
+                if state.project == "unknown":
+                    proj = antigravity_adapter.extract_project_from_tool_calls(tool_calls)
+                    if proj:
+                        state.project = proj
+            elif dtype == "PLANNER_RESPONSE":
+                state.pending_tool = False
+                state.pending_question = ""
+                content = data.get("content")
+                if isinstance(content, str) and content.strip():
+                    state.last_reply = content
+
+    if not state.prompts:
+        return None
+    prompts = state.prompts if max_prompts is None else state.prompts[-max_prompts:]
+    next_hint = (state.pending_question if state.pending_tool and state.pending_question
+                 else _hint_text(state.last_reply))
+    return _Parsed(state.session_id, state.project, prompts, state.pending_tool, state.model,
+                   next_hint=next_hint, last_event=state.last_event)
+
+
 _HINT_MAX_LINES = 5   # 「下一步」显示上限（AskUserQuestion 格式化路径用；打分路径上限 3）
 _HINT_PICK_LINES = 3  # 句子打分路径最多保留 N 个正分句
 
@@ -879,8 +1034,12 @@ def _format_question(tool_input: dict) -> str:
         text = (q.get("question") or "").strip()
         if text:
             lines.append(text[:160])
-        opts = " / ".join((o.get("label") or "").strip()
-                          for o in (q.get("options") or []) if isinstance(o, dict))
+        opt_labels = [
+            (o.get("label") or "").strip() if isinstance(o, dict) else o.strip()
+            for o in (q.get("options") or [])
+            if isinstance(o, (dict, str))
+        ]
+        opts = " / ".join(label for label in opt_labels if label)
         if opts:
             lines.append(("· " + opts)[:160])
     return "\n".join(lines[:_HINT_MAX_LINES])

@@ -22,6 +22,7 @@ def _current_session_id() -> str:
         os.environ.get("TT_SIDEBAR_SESSION_ID")
         or os.environ.get("CODEX_THREAD_ID")
         or os.environ.get("CLAUDE_SESSION_ID")
+        or os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
         or _kimi_session_id_for_cwd()
     ).strip()
 
@@ -111,7 +112,7 @@ def open_split() -> int:
     try:
         tracked_session_id = _current_session_id()
         if not tracked_session_id:
-            print("无法识别当前 Claude Code / Codex / Kimi Code 会话 ID。", file=sys.stderr)
+            print("无法识别当前 Claude Code / Codex / Kimi Code / Antigravity 会话 ID。", file=sys.stderr)
             return 1
         if pane := os.environ.get("TMUX_PANE"):
             ok, message = _open_tmux(pane, tracked_session_id)

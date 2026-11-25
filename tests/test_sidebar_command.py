@@ -11,7 +11,13 @@ from token_tracker import sidebar_command
 
 
 def test_current_session_id_prefers_explicit_then_codex(monkeypatch):
+    monkeypatch.delenv("TT_SIDEBAR_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    monkeypatch.setenv("ANTIGRAVITY_CONVERSATION_ID", "agy-conv")
+    assert sidebar_command._current_session_id() == "agy-conv"
     monkeypatch.setenv("CLAUDE_SESSION_ID", "claude")
+    assert sidebar_command._current_session_id() == "claude"
     monkeypatch.setenv("CODEX_THREAD_ID", "codex")
     assert sidebar_command._current_session_id() == "codex"
     monkeypatch.setenv("TT_SIDEBAR_SESSION_ID", "explicit")
@@ -20,7 +26,7 @@ def test_current_session_id_prefers_explicit_then_codex(monkeypatch):
 
 def test_current_session_id_falls_back_to_kimi_cwd_session(tmp_path, monkeypatch):
     # Kimi 会话内无 session id 环境变量 → 回退 state.json 中工作目录匹配且 updatedAt 最新的会话
-    for var in ("TT_SIDEBAR_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID"):
+    for var in ("TT_SIDEBAR_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "ANTIGRAVITY_CONVERSATION_ID"):
         monkeypatch.delenv(var, raising=False)
     kimi_home_dir = tmp_path / ".kimi-code"
     proj = tmp_path / "proj"

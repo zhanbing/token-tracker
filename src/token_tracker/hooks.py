@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from importlib import resources
 
 from . import config, sidebar_install
-from .adapters.util import claude_home, codex_home, kimi_home
+from .adapters.util import antigravity_home, claude_home, codex_home, kimi_home
 from .analyzer import cost as _cost_mod
 from .i18n import t
 from .ui import themes
@@ -18,19 +18,26 @@ from .ui.console import get_console
 _CLAUDE = claude_home()  # CLAUDE_CONFIG_DIR 覆盖 / ~/.claude
 _CODEX = codex_home()    # CODEX_HOME 覆盖 / ~/.codex
 _KIMI = kimi_home()      # KIMI_CODE_HOME 覆盖 / ~/.kimi-code
+_ANTIGRAVITY = antigravity_home()  # ANTIGRAVITY_APP_DATA_DIR / ANTIGRAVITY_HOME / AGY_HOME 覆盖
 
 
 @dataclass
 class SetupComponents:
-    """组件开关。CC statusLine 接管、Codex 伪 statusline（Stop hook）与 Kimi statusline
-    （tui.toml [status_line].command）均为可选组件，意图持久化到 config.json。"""
+    """组件开关。CC statusLine、Codex 伪 statusline、Kimi statusline 与 Antigravity statusLine
+    均为可选组件，意图持久化到 config.json。"""
     cc_statusline: bool = True
     codex_faux_statusline: bool = True
     kimi_statusline: bool = True
+    antigravity_statusline: bool = True
 
     @classmethod
     def all_on(cls) -> "SetupComponents":
-        return cls(cc_statusline=True, codex_faux_statusline=True, kimi_statusline=True)
+        return cls(
+            cc_statusline=True,
+            codex_faux_statusline=True,
+            kimi_statusline=True,
+            antigravity_statusline=True,
+        )
 
 # tt 自己的产物（statusline 脚本 + 缓存 + 备份）集中放 ~/.config/token-tracker（XDG，跟 theme/lang 同处）；
 # settings.json / config.toml 是「改 agent 自己的配置」、必须留 agent 目录。statusLine/hook 的 command
@@ -39,6 +46,10 @@ _TT = config.CONFIG_DIR  # ~/.config/token-tracker
 
 CLAUDE_SETTINGS = os.path.join(_CLAUDE, "settings.json")  # 改 Claude Code 配置，留 agent 目录
 HOOK_SCRIPT_PATH = os.path.join(_TT, "claude-statusline.py")
+ANTIGRAVITY_SETTINGS = os.path.join(_ANTIGRAVITY, "settings.json")  # 改 Antigravity CLI 配置，留 agent 目录
+ANTIGRAVITY_STATUSLINE_HOOK_PATH = os.path.join(_TT, "antigravity-statusline.py")
+ANTIGRAVITY_STATUS_FILE = config.ANTIGRAVITY_STATUS_FILE
+ANTIGRAVITY_BACKUP_PATH = os.path.join(_TT, "antigravity-backup.json")
 CODEX_DIR = _CODEX
 CODEX_CONFIG = os.path.join(CODEX_DIR, "config.toml")     # 仅迁移旧内联 Stop；新 Hook 统一写 hooks.json
 CODEX_STATUSLINE_HOOK_PATH = os.path.join(_TT, "codex-statusline.py")
@@ -48,10 +59,11 @@ KIMI_STATUSLINE_STATE_PATH = os.path.join(_TT, "tt-kimi-statusline.json")
 # Kimi statusline 的 5h/7d 限额缓存（模板的 detached --refresh-quota 子进程写）
 KIMI_STATUSLINE_QUOTA_PATH = os.path.join(_TT, "tt-kimi-quota.json")
 STATUS_FILE = config.STATUS_FILE                          # CC statusline 缓存（单一权威定义在 config）
-TERMINAL_MAP_FILE = config.TERMINAL_MAP_FILE              # Codex Stop hook 采集的终端定位映射
+TERMINAL_MAP_FILE = config.TERMINAL_MAP_FILE              # Codex/Kimi/Antigravity 采集的终端定位映射
 HOOK_VERSION = "2.1"  # 2.0: 采集 _terminal_map（sidebar 点击跳转）；2.1: 共享状态无条件随帧携带、防异常帧清表
 STATUSLINE_HOOK_VERSION = "2.0"  # 2.0: Codex Hook 输出纯文本，避免新版 TUI 将 ANSI 序列显示为乱码
 KIMI_STATUSLINE_HOOK_VERSION = "1.2"  # 1.2: Model 段加实际 effort（wire thinkingEffort），新增 Out t/s（output÷请求时长）
+ANTIGRAVITY_STATUSLINE_HOOK_VERSION = "1.1"  # 1.1: 烘焙内置定价，stdin 无 cost 时按 transcript 估算会话成本
 
 CC_BACKUP_PATH = os.path.join(_TT, "cc-backup.json")
 CODEX_BACKUP_LEGACY = os.path.join(_TT, "codex-backup.json")  # 老用户残留，unsetup 时还能恢复
@@ -185,6 +197,128 @@ def kimi_statusline_active() -> bool:
     return sidebar_install.kimi_statusline_hook_present()
 
 
+# --- Antigravity CLI statusLine（官方 settings.json statusLine.command，镜像 CC statusLine） ---
+
+
+def _render_antigravity_statusline_hook() -> str:
+    """注入版本号 + 当前主题 truecolor / 256 两套配色 + 内置定价底座，得到 Antigravity statusLine 脚本。"""
+    name = config.resolve_theme()
+    fallback = _cost_mod._fallback_pricing()
+    pricing = {
+        k: v for k, v in fallback.items()
+        if k.startswith(("gemini-", "claude-", "gpt-"))
+    }
+    return (
+        _load_template("antigravity_statusline.py")
+        .replace("__ANTIGRAVITY_STATUSLINE_HOOK_VERSION__", ANTIGRAVITY_STATUSLINE_HOOK_VERSION)
+        .replace("__STATUSLINE_TRUECOLOR__", repr(themes.theme_to_statusline_ansi(name)))
+        .replace("__STATUSLINE_COLOR256__", repr(themes.theme_to_statusline_ansi(name, "256")))
+        .replace("__ANTIGRAVITY_PRICING__", repr(pricing))
+    )
+
+
+def _write_antigravity_statusline_script() -> None:
+    os.makedirs(_TT, exist_ok=True)
+    with open(ANTIGRAVITY_STATUSLINE_HOOK_PATH, "w", encoding="utf-8") as f:
+        f.write(_render_antigravity_statusline_hook())
+    if os.name != "nt":
+        os.chmod(
+            ANTIGRAVITY_STATUSLINE_HOOK_PATH,
+            os.stat(ANTIGRAVITY_STATUSLINE_HOOK_PATH).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
+        )
+
+
+def _installed_antigravity_statusline_version() -> str | None:
+    try:
+        with open(ANTIGRAVITY_STATUSLINE_HOOK_PATH, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("__version__"):
+                    return line.split("=", 1)[1].strip().strip('"\'')
+    except OSError:
+        pass
+    return None
+
+
+def _is_tt_antigravity_command(cmd: str) -> bool:
+    return "antigravity-statusline" in cmd
+
+
+def _antigravity_statusline_command(python: str | None = None) -> str:
+    """Antigravity CLI 在 Unix 走 sh -c、Windows 走 cmd /c 执行 statusLine.command。"""
+    python = python or sys.executable or "python3"
+    if os.name == "nt":
+        return f"{_kimi_cmd_path(python)} {_kimi_cmd_path(ANTIGRAVITY_STATUSLINE_HOOK_PATH)}"
+    return f'"{python}" "{ANTIGRAVITY_STATUSLINE_HOOK_PATH}"'
+
+
+def _antigravity_settings_has_tt_statusline() -> bool:
+    try:
+        with open(ANTIGRAVITY_SETTINGS, encoding="utf-8") as f:
+            settings = json.load(f)
+        sl = settings.get("statusLine")
+        return (
+            isinstance(sl, dict)
+            and sl.get("enabled") is not False
+            and _is_tt_antigravity_command(sl.get("command") or "")
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def antigravity_statusline_active() -> bool:
+    """双因素：用户意图 AND 实际装好（脚本文件 + settings.json 的 statusLine 指向 tt 脚本且启用）。"""
+    if config.antigravity_statusline_intent() is not True:
+        return False
+    if not os.path.exists(ANTIGRAVITY_STATUSLINE_HOOK_PATH):
+        return False
+    return _antigravity_settings_has_tt_statusline()
+
+
+def _antigravity_command_needs_sync() -> bool:
+    if not os.path.exists(ANTIGRAVITY_SETTINGS):
+        return True
+    try:
+        with open(ANTIGRAVITY_SETTINGS, encoding="utf-8") as f:
+            settings = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(settings, dict):
+        return False
+    sl = settings.get("statusLine")
+    if not isinstance(sl, dict):
+        return True
+    cmd = sl.get("command") or ""
+    if cmd and not (isinstance(cmd, str) and _is_tt_antigravity_command(cmd)):
+        return False  # 用户自己的 statusLine，不抢占
+    return cmd != _antigravity_statusline_command() or sl.get("enabled") is False
+
+
+def _sync_antigravity_command() -> None:
+    try:
+        if os.path.exists(ANTIGRAVITY_SETTINGS):
+            with open(ANTIGRAVITY_SETTINGS, encoding="utf-8") as f:
+                settings = json.load(f)
+        else:
+            settings = {}
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(settings, dict):
+        return
+    sl = settings.get("statusLine")
+    if isinstance(sl, dict):
+        cmd = sl.get("command") or ""
+        if cmd and not (isinstance(cmd, str) and _is_tt_antigravity_command(cmd)):
+            return
+    settings["statusLine"] = {
+        "type": "command",
+        "command": _antigravity_statusline_command(),
+        "enabled": True,
+    }
+    os.makedirs(os.path.dirname(ANTIGRAVITY_SETTINGS), exist_ok=True)
+    with open(ANTIGRAVITY_SETTINGS, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+
+
 # 迁移 / 卸载时定位 tt 旧版追加的整段 [[hooks.Stop]]——
 # 同时认新（codex-statusline）/ 旧（tt-statusline）两种特征码。
 # command 值兼容三代形态：双引号 basic string（最老）、单引号 literal 裸拼接（0.4.x）、
@@ -299,7 +433,29 @@ def recommended_components() -> SetupComponents:
     else:
         kimi_intent = config.kimi_statusline_intent()
         kimi = kimi_intent if kimi_intent is not None else True
-    return SetupComponents(cc_statusline=cc, codex_faux_statusline=codex, kimi_statusline=kimi)
+    antigravity = True
+    if os.path.exists(ANTIGRAVITY_SETTINGS):
+        try:
+            with open(ANTIGRAVITY_SETTINGS, encoding="utf-8") as f:
+                ag_settings = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            ag_settings = None  # 损坏 → 不可安全触碰
+        if not isinstance(ag_settings, dict):
+            antigravity = False
+        else:
+            sl = ag_settings.get("statusLine")
+            cmd = sl.get("command") if isinstance(sl, dict) else None
+            if cmd and not (isinstance(cmd, str) and _is_tt_antigravity_command(cmd)):
+                antigravity = False  # 非 tt 的自定义 statusLine → 不静默替换
+    if antigravity:
+        ag_intent = config.antigravity_statusline_intent()
+        antigravity = ag_intent if ag_intent is not None else True
+    return SetupComponents(
+        cc_statusline=cc,
+        codex_faux_statusline=codex,
+        kimi_statusline=kimi,
+        antigravity_statusline=antigravity,
+    )
 
 
 def is_setup() -> bool:
@@ -309,7 +465,8 @@ def is_setup() -> bool:
     has_cc = os.path.isdir(os.path.dirname(CLAUDE_SETTINGS))
     has_codex = os.path.isdir(CODEX_DIR)
     has_kimi = os.path.isdir(_KIMI)
-    if not has_cc and not has_codex and not has_kimi:
+    has_antigravity = os.path.isdir(os.path.dirname(ANTIGRAVITY_SETTINGS))
+    if not has_cc and not has_codex and not has_kimi and not has_antigravity:
         return False
     if has_cc:
         intent = config.cc_statusline_intent()
@@ -332,6 +489,12 @@ def is_setup() -> bool:
         if intent is None:  # 没跑过 wizard、没表达意图 → 视为未配（老用户升级后重走一次 setup）
             return False
         if intent and not kimi_statusline_active():
+            return False
+    if has_antigravity:
+        intent = config.antigravity_statusline_intent()
+        if intent is None:  # 没跑过 wizard、没表达意图 → 视为未配
+            return False
+        if intent and not antigravity_statusline_active():
             return False
     return True
 
@@ -497,12 +660,24 @@ def needs_update() -> bool:
             return True
         if sidebar_install.kimi_statusline_needs_sync(_kimi_statusline_command()):
             return True
+    # setup_version 6 起，Antigravity statusLine（settings.json + antigravity-statusline.py）也属于 setup 产物
+    if (
+        os.path.isdir(os.path.dirname(ANTIGRAVITY_SETTINGS))
+        and config.setup_version() >= 6
+        and config.antigravity_statusline_intent() is True
+    ):
+        if _installed_antigravity_statusline_version() != ANTIGRAVITY_STATUSLINE_HOOK_VERSION:
+            return True
+        if _antigravity_command_needs_sync():
+            return True
     return _cc_command_needs_sync()  # settings.json 里 command 格式过时也算待更新（issue #13/#14）
 
 
 def update_hook() -> None:
     if os.path.exists(HOOK_SCRIPT_PATH):  # 已装才同步（未装不主动装）
         _write_cc_statusline_script()
+    if os.path.exists(ANTIGRAVITY_STATUSLINE_HOOK_PATH):  # 切主题等场景重烘焙脚本
+        _write_antigravity_statusline_script()
     if _installed_codex_statusline_version() is not None:
         _write_codex_statusline_script()
     if _cc_command_needs_sync():
@@ -524,6 +699,14 @@ def update_hook() -> None:
             sidebar_install.install_kimi_statusline(_kimi_statusline_command())
         except ValueError:
             pass
+    if (
+        os.path.isdir(os.path.dirname(ANTIGRAVITY_SETTINGS))
+        and config.setup_version() >= 6
+        and config.antigravity_statusline_intent() is True
+    ):
+        _write_antigravity_statusline_script()
+        if _antigravity_command_needs_sync():
+            _sync_antigravity_command()
 
 
 # --- setup ---
@@ -539,8 +722,9 @@ def setup(auto: bool = False, components: SetupComponents | None = None, quiet: 
     has_cc = os.path.isdir(os.path.dirname(CLAUDE_SETTINGS))
     has_codex = os.path.isdir(CODEX_DIR)
     has_kimi = os.path.isdir(_KIMI)
+    has_antigravity = os.path.isdir(os.path.dirname(ANTIGRAVITY_SETTINGS))
 
-    if not has_cc and not has_codex and not has_kimi:
+    if not has_cc and not has_codex and not has_kimi and not has_antigravity:
         p(f"[red]{t('no_agent_install')}[/red]")
         return
 
@@ -569,6 +753,12 @@ def setup(auto: bool = False, components: SetupComponents | None = None, quiet: 
     else:
         if not auto:
             p(f"[dim]{t('kimi_not_found')}[/dim]")
+
+    if has_antigravity:
+        _setup_antigravity(components, quiet)
+    else:
+        if not auto:
+            p(f"[dim]{t('antigravity_not_found')}[/dim]")
 
     # setup 真正落地了，写入当前引导版本——后续启动 cli 不再触发"老用户重新引导"。
     # early-return 分支（无 agent）不会到这，符合语义。
@@ -789,12 +979,124 @@ def _setup_kimi_sidebar(quiet: bool = False) -> None:
         p(f"[dim]{t('kimi_hook_hint')}[/dim]")
 
 
+def _restore_antigravity_statusline(settings: dict, p) -> None:
+    """statusLine 是 tt 的才动：从 antigravity-backup.json 还原（或直接移除）+ 删状态缓存。"""
+    sl = settings.get("statusLine")
+    if not (isinstance(sl, dict) and _is_tt_antigravity_command(sl.get("command") or "")):
+        return
+    previous = None
+    if os.path.exists(ANTIGRAVITY_BACKUP_PATH):
+        try:
+            with open(ANTIGRAVITY_BACKUP_PATH, encoding="utf-8") as f:
+                previous = json.load(f).get("statusLine")
+        except (OSError, json.JSONDecodeError):
+            p(f"[yellow]{t('antigravity_backup_corrupt', path=ANTIGRAVITY_BACKUP_PATH)}[/yellow]")
+        else:
+            os.remove(ANTIGRAVITY_BACKUP_PATH)
+    if isinstance(previous, dict):
+        settings["statusLine"] = previous
+        p(f"[green]✓[/green] {t('antigravity_restored')}")
+    else:
+        settings.pop("statusLine", None)
+        p(f"[green]✓[/green] {t('antigravity_removed')}")
+    if os.path.exists(ANTIGRAVITY_STATUS_FILE):
+        os.remove(ANTIGRAVITY_STATUS_FILE)
+        p(f"[green]✓[/green] {t('deleted_cache', path=ANTIGRAVITY_STATUS_FILE)}")
+
+
+def _optout_antigravity(p) -> None:
+    """Antigravity opt-out：删 tt 脚本 + 只还原「本来是 tt 的」statusLine，用户自定义的完全不碰。"""
+    if os.path.exists(ANTIGRAVITY_STATUSLINE_HOOK_PATH):
+        os.remove(ANTIGRAVITY_STATUSLINE_HOOK_PATH)
+    if os.path.exists(ANTIGRAVITY_SETTINGS):
+        try:
+            with open(ANTIGRAVITY_SETTINGS, encoding="utf-8") as f:
+                settings = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            settings = None
+        if isinstance(settings, dict):
+            before = json.dumps(settings, sort_keys=True)
+            _restore_antigravity_statusline(settings, p)
+            if json.dumps(settings, sort_keys=True) != before:
+                with open(ANTIGRAVITY_SETTINGS, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, indent=2, ensure_ascii=False)
+    p(f"[dim]{t('antigravity_statusline_skipped')}[/dim]")
+
+
+def _setup_antigravity(components: SetupComponents, quiet: bool = False) -> None:
+    """Antigravity 端装/卸 statusLine 接管（镜像 _setup_claude）。"""
+    p = (lambda *a, **k: None) if quiet else get_console().print
+    config.save_antigravity_statusline(components.antigravity_statusline)
+
+    if not components.antigravity_statusline:
+        _optout_antigravity(p)
+        return
+
+    settings: dict = {}
+    if os.path.exists(ANTIGRAVITY_SETTINGS):
+        try:
+            with open(ANTIGRAVITY_SETTINGS, encoding="utf-8") as f:
+                parsed = json.load(f)
+            if not isinstance(parsed, dict):
+                raise ValueError("settings root is not a JSON object")
+            settings = parsed
+        except (OSError, ValueError):
+            get_console().print(f"[red]{t('antigravity_settings_corrupt', path=ANTIGRAVITY_SETTINGS)}[/red]")
+            return
+
+    _write_antigravity_statusline_script()
+
+    existing = settings.get("statusLine")
+    if isinstance(existing, dict) and existing.get("command") and not _is_tt_antigravity_command(existing.get("command") or ""):
+        p(f"[yellow]{t('sl_backup_replace')}[/yellow]")
+        os.makedirs(_TT, exist_ok=True)
+        with open(ANTIGRAVITY_BACKUP_PATH, "w", encoding="utf-8") as f:
+            json.dump({"statusLine": existing}, f, indent=2)
+
+    settings["statusLine"] = {
+        "type": "command",
+        "command": _antigravity_statusline_command(),
+        "enabled": True,
+    }
+    os.makedirs(os.path.dirname(ANTIGRAVITY_SETTINGS), exist_ok=True)
+    with open(ANTIGRAVITY_SETTINGS, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+
+    p(f"[green]✓[/green] {t('antigravity_configured')}")
+    p(f"[dim]{t('restart_antigravity')}[/dim]")
+
+
+def _unsetup_antigravity() -> None:
+    if os.path.exists(ANTIGRAVITY_STATUSLINE_HOOK_PATH):
+        os.remove(ANTIGRAVITY_STATUSLINE_HOOK_PATH)
+        get_console().print(f"[green]✓[/green] {t('deleted_file', path=ANTIGRAVITY_STATUSLINE_HOOK_PATH)}")
+    if not os.path.exists(ANTIGRAVITY_SETTINGS):
+        if os.path.exists(ANTIGRAVITY_STATUS_FILE):
+            os.remove(ANTIGRAVITY_STATUS_FILE)
+            get_console().print(f"[green]✓[/green] {t('deleted_cache', path=ANTIGRAVITY_STATUS_FILE)}")
+        return
+    try:
+        with open(ANTIGRAVITY_SETTINGS, encoding="utf-8") as f:
+            settings = json.load(f)
+        if not isinstance(settings, dict):
+            raise ValueError("settings root is not a JSON object")
+    except (OSError, ValueError):
+        get_console().print(f"[red]{t('antigravity_settings_corrupt_unsetup', path=ANTIGRAVITY_SETTINGS)}[/red]")
+        return
+
+    _restore_antigravity_statusline(settings, get_console().print)
+
+    with open(ANTIGRAVITY_SETTINGS, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+
+
 # --- unsetup ---
 
 def unsetup() -> None:
     has_cc = os.path.isdir(os.path.dirname(CLAUDE_SETTINGS))
     has_codex = os.path.isdir(CODEX_DIR)
     has_kimi = os.path.isdir(_KIMI)
+    has_antigravity = os.path.isdir(os.path.dirname(ANTIGRAVITY_SETTINGS))
 
     if has_cc:
         _unsetup_claude()
@@ -804,7 +1106,9 @@ def unsetup() -> None:
     if has_kimi:
         _unsetup_kimi_statusline()
         _unsetup_kimi_sidebar()
-    if not has_cc and not has_codex and not has_kimi:
+    if has_antigravity:
+        _unsetup_antigravity()
+    if not has_cc and not has_codex and not has_kimi and not has_antigravity:
         get_console().print(f"[dim]{t('no_agent_detected')}[/dim]")
 
 

@@ -31,6 +31,11 @@ def _isolate_real_home(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "CODEX_DIR", str(home / ".codex"))
     monkeypatch.setattr(hooks, "CODEX_CONFIG", str(home / ".codex" / "config.toml"))
     monkeypatch.setattr(hooks, "_KIMI", str(home / ".kimi-code"))
+    monkeypatch.setattr(hooks, "_ANTIGRAVITY", str(home / ".gemini" / "antigravity-cli"))
+    monkeypatch.setattr(hooks, "ANTIGRAVITY_SETTINGS", str(home / ".gemini" / "antigravity-cli" / "settings.json"))
+    monkeypatch.setattr(hooks, "ANTIGRAVITY_STATUSLINE_HOOK_PATH", str(tt / "antigravity-statusline.py"))
+    monkeypatch.setattr(hooks, "ANTIGRAVITY_STATUS_FILE", str(tt / "tt-antigravity-status.json"))
+    monkeypatch.setattr(hooks, "ANTIGRAVITY_BACKUP_PATH", str(tt / "antigravity-backup.json"))
     monkeypatch.setattr(sidebar_install, "KIMI_CONFIG", str(home / ".kimi-code" / "config.toml"))
     monkeypatch.setattr(
         sidebar_install, "KIMI_SKILL_DIR", str(home / ".kimi-code" / "skills" / "tt-sidebar")
@@ -53,6 +58,7 @@ def _isolate_real_home(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIG_DIR", str(cfg))
     monkeypatch.setattr(config, "CONFIG_PATH", str(cfg / "config.json"))
     monkeypatch.setattr(config, "STATUS_FILE", str(cfg / "tt-status.json"))
+    monkeypatch.setattr(config, "ANTIGRAVITY_STATUS_FILE", str(cfg / "tt-antigravity-status.json"))
     monkeypatch.setattr(config, "TERMINAL_MAP_FILE", str(cfg / "tt-terminal-map.json"))
     monkeypatch.setattr(config, "_LEGACY_THEME_PATH", str(cfg / "theme.json"))
     monkeypatch.setattr(config, "_LEGACY_LANG_PATH", str(cfg / "lang.json"))
@@ -1213,6 +1219,7 @@ def test_ask_components_asks_cc_then_codex(monkeypatch):
     monkeypatch.setattr(wizard, "_has_cc", lambda: True)
     monkeypatch.setattr(wizard, "_has_codex", lambda: True)
     monkeypatch.setattr(wizard, "_has_kimi", lambda: False)  # 本机装有 Kimi，固定关掉、问题数稳定
+    monkeypatch.setattr(wizard, "_has_antigravity", lambda: False)
     monkeypatch.setattr(wizard, "recommended_components",
                         lambda: hooks.SetupComponents(cc_statusline=False, codex_faux_statusline=True))
 
@@ -1234,6 +1241,7 @@ def test_ask_components_cc_only(monkeypatch):
     monkeypatch.setattr(wizard, "_has_cc", lambda: True)
     monkeypatch.setattr(wizard, "_has_codex", lambda: False)
     monkeypatch.setattr(wizard, "_has_kimi", lambda: False)  # 本机装有 Kimi，固定关掉、问题数稳定
+    monkeypatch.setattr(wizard, "_has_antigravity", lambda: False)
     monkeypatch.setattr(wizard, "recommended_components", lambda: hooks.SetupComponents())
     monkeypatch.setattr(wizard, "_ask_yes_no", lambda message, default: calls.append(message) or True)
     c = wizard.ask_components()
@@ -1711,6 +1719,7 @@ def test_ask_components_kimi_question(monkeypatch):
     monkeypatch.setattr(wizard, "_has_cc", lambda: False)
     monkeypatch.setattr(wizard, "_has_codex", lambda: False)
     monkeypatch.setattr(wizard, "_has_kimi", lambda: True)
+    monkeypatch.setattr(wizard, "_has_antigravity", lambda: False)
     monkeypatch.setattr(wizard, "recommended_components",
                         lambda: hooks.SetupComponents(kimi_statusline=False))
     monkeypatch.setattr(wizard, "_ask_yes_no",
@@ -1720,3 +1729,233 @@ def test_ask_components_kimi_question(monkeypatch):
     assert asked[0][0].startswith("[1] ")
     assert c.kimi_statusline is False
     assert c.cc_statusline is True and c.codex_faux_statusline is True
+
+
+# --- Antigravity CLI statusLine（官方 settings.json statusLine.command） ---
+
+
+def _antigravity_only_home(tmp_path, monkeypatch):
+    agy_dir = tmp_path / "_home" / ".gemini" / "antigravity-cli"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(hooks, "_ANTIGRAVITY", str(agy_dir))
+    monkeypatch.setattr(hooks, "ANTIGRAVITY_SETTINGS", str(agy_dir / "settings.json"))
+    return agy_dir
+
+
+def test_rendered_antigravity_statusline_has_version_and_no_placeholders():
+    rendered = hooks._render_antigravity_statusline_hook()
+    assert f'__version__ = "{hooks.ANTIGRAVITY_STATUSLINE_HOOK_VERSION}"' in rendered
+    assert "__ANTIGRAVITY_STATUSLINE_HOOK_VERSION__" not in rendered
+    assert "__STATUSLINE_TRUECOLOR__" not in rendered
+    assert "__STATUSLINE_COLOR256__" not in rendered
+    assert "__ANTIGRAVITY_PRICING__" not in rendered
+
+
+def test_antigravity_statusline_render_incremental_cache_and_terminal_map(tmp_path):
+    script = tmp_path / "antigravity-statusline.py"
+    script.write_text(hooks._render_antigravity_statusline_hook(), encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    proj = tmp_path / "demo-repo"
+    proj.mkdir()
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-25T10:00:00Z", "model": "gemini-3.6-flash",
+            "input_tokens": 10000, "output_tokens": 500, "cache_read_tokens": 2000,
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = {
+        "conversation_id": "conv-ag-1",
+        "workspace": {"project_dir": str(proj)},
+        "vcs": {"type": "git", "branch": "main", "dirty": True},
+        "transcript_path": str(transcript),
+        "terminal_width": 120,
+        "model": {"id": "gemini-3.6-flash", "display_name": "Gemini 3.6 Flash (High)", "effort": "high"},
+        "cycle_mode": "auto",
+        "plan_tier": "Google AI Pro",
+        "cost": {"total_cost_usd": 1.25, "total_duration_ms": 120_000},
+        "context_window": {
+            "context_window_size": 1_000_000,
+            "used_percentage": 22,
+            "total_input_tokens": 10000,
+            "total_output_tokens": 500,
+            "current_usage": {"input_tokens": 10000, "output_tokens": 500, "cache_read_input_tokens": 2000},
+        },
+        "quota": {
+            "gemini-5h": {"remaining_fraction": 0.70, "reset_in_seconds": 3600},
+            "gemini-weekly": {"remaining_fraction": 0.85, "reset_in_seconds": 86400 * 3},
+            "3p-weekly": {"remaining_fraction": 0.10, "reset_in_seconds": 86400},
+        },
+    }
+    env = dict(os.environ, HOME=str(home), COLORTERM="truecolor",
+               ITERM_SESSION_ID="w0t1p0:AGY-1", TMUX_PANE="%11")
+
+    r1 = subprocess.run([sys.executable, str(script)], input=json.dumps(payload),
+                        capture_output=True, text=True, env=env)
+    assert r1.returncode == 0
+    plain1 = re.sub(r"\x1b\[[0-9;]*m", "", r1.stdout)
+    lines = plain1.strip().splitlines()
+    assert len(lines) == 4
+    assert "[demo-repo](main*)" in lines[0]
+    assert "Total: 12k" in lines[0] and "Cost: $1.25" in lines[0]
+    assert "Limit:" in lines[1] and "5h:" in lines[1] and "30%" in lines[1]
+    assert "7d:" in lines[1] and "15%" in lines[1]  # 命中 gemini 桶，非 3p 桶(90%)
+    assert "1.0M Ctx:" in lines[1] and "22%" in lines[1]
+    assert "Tokens: in 10k, out 500, cache 2k" in lines[2]
+    assert "Model: Gemini 3.6 Flash/high/auto" in lines[3]
+    assert "Duration: 2min" in lines[3] and "Plan: Google AI Pro" in lines[3]
+
+    # 追加一条新 step，验证按 offset 增量累计（12,500 + 2,500 = 15,000 → 15k）
+    with open(transcript, "a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-25T10:01:00Z", "model": "gemini-3.6-flash",
+            "input_tokens": 2000, "output_tokens": 500, "cache_read_tokens": 0,
+        }) + "\n")
+    r2 = subprocess.run([sys.executable, str(script)], input=json.dumps(payload),
+                        capture_output=True, text=True, env=env)
+    assert r2.returncode == 0
+    plain2 = re.sub(r"\x1b\[[0-9;]*m", "", r2.stdout)
+    assert "Total: 15k" in plain2
+
+    # 终端映射与状态缓存均已原子落盘
+    tmap = json.loads((home / ".config" / "token-tracker" / "tt-terminal-map.json").read_text())["_terminal_map"]
+    assert tmap["conv-ag-1"] == {"iterm": "w0t1p0:AGY-1", "tmux": "%11"}
+    status = json.loads((home / ".config" / "token-tracker" / "tt-antigravity-status.json").read_text())
+    assert status["conversation_id"] == "conv-ag-1" and "_received_at" in status
+
+    # 窄终端退化：terminal_width=40 时隐藏倒计时并把进度条压成百分比
+    narrow = dict(payload, terminal_width=40)
+    r3 = subprocess.run([sys.executable, str(script)], input=json.dumps(narrow),
+                        capture_output=True, text=True, env=env)
+    plain3 = re.sub(r"\x1b\[[0-9;]*m", "", r3.stdout)
+    assert "5h:30%" in plain3 and "█" not in plain3.splitlines()[1]
+
+    # stdin 不含 cost 时回退到 transcript 内置定价估算（gemini-4-neon-xhigh: $3/$15/$0.15 per MTok）
+    neon_t = tmp_path / "neon.jsonl"
+    neon_t.write_text(
+        json.dumps({
+            "step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
+            "created_at": "2026-11-25T10:00:00Z", "model": "gemini-4-neon-xhigh",
+            "input_tokens": 100_000, "output_tokens": 20_000, "cache_read_tokens": 200_000,
+        }) + "\n",
+        encoding="utf-8",
+    )
+    no_cost_payload = {
+        "conversation_id": "conv-ag-neon",
+        "workspace": {"project_dir": str(proj)},
+        "transcript_path": str(neon_t),
+        "terminal_width": 120,
+        "model": {"id": "gemini-4-neon-xhigh", "display_name": "Gemini 4 Neon", "effort": "xhigh"},
+    }
+    r4 = subprocess.run([sys.executable, str(script)], input=json.dumps(no_cost_payload),
+                        capture_output=True, text=True, env=env)
+    plain4 = re.sub(r"\x1b\[[0-9;]*m", "", r4.stdout)
+    # 0.1*3 + 0.02*15 + 0.2*0.15 = 0.30 + 0.30 + 0.03 = $0.63
+    assert "Cost: $0.63" in plain4
+
+
+def test_antigravity_recommended_components_do_no_harm(tmp_path, monkeypatch):
+    agy_dir = _antigravity_only_home(tmp_path, monkeypatch)
+    settings_path = agy_dir / "settings.json"
+
+    assert hooks.recommended_components().antigravity_statusline is True
+
+    settings_path.write_text(json.dumps({"statusLine": {"type": "command", "command": "/usr/bin/my-sl"}}),
+                             encoding="utf-8")
+    assert hooks.recommended_components().antigravity_statusline is False
+    config.save_antigravity_statusline(True)
+    assert hooks.recommended_components().antigravity_statusline is False  # 探测优先于 intent
+
+    settings_path.write_text("{corrupt json", encoding="utf-8")
+    assert hooks.recommended_components().antigravity_statusline is False
+
+    settings_path.write_text(json.dumps({"model": "gemini-3.6-flash"}), encoding="utf-8")
+    assert hooks.recommended_components().antigravity_statusline is True
+    config.save_antigravity_statusline(False)
+    assert hooks.recommended_components().antigravity_statusline is False
+
+
+def test_antigravity_setup_backup_optout_and_unsetup(tmp_path, monkeypatch):
+    agy_dir = _antigravity_only_home(tmp_path, monkeypatch)
+    settings_path = agy_dir / "settings.json"
+    original_sl = {"type": "command", "command": "/usr/bin/custom-agy-sl", "enabled": True}
+    settings_path.write_text(json.dumps({"model": "auto", "statusLine": original_sl}), encoding="utf-8")
+
+    # 1. 自动推荐安装：检测到用户自定义 statusLine → 默认 opt-out、不覆盖
+    assert hooks.is_setup() is False
+    hooks.setup(auto=True, quiet=True)
+    assert config.antigravity_statusline_intent() is False
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["statusLine"] == original_sl
+    assert not os.path.exists(hooks.ANTIGRAVITY_STATUSLINE_HOOK_PATH)
+    assert hooks.is_setup() is True
+
+    # 2. 用户显式选择接管 → 备份原配置并写入 tt statusLine，保留其它字段
+    hooks.setup(components=hooks.SetupComponents(antigravity_statusline=True), quiet=True)
+    assert config.antigravity_statusline_intent() is True
+    assert os.path.exists(hooks.ANTIGRAVITY_STATUSLINE_HOOK_PATH)
+    assert os.path.exists(hooks.ANTIGRAVITY_BACKUP_PATH)
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved["model"] == "auto"
+    assert saved["statusLine"]["enabled"] is True
+    assert "antigravity-statusline.py" in saved["statusLine"]["command"]
+    assert hooks.antigravity_statusline_active() is True
+    assert hooks.is_setup() is True
+
+    # 3. 模拟运行缓存后卸载 → 还原原自定义 statusLine，删脚本和缓存
+    with open(hooks.ANTIGRAVITY_STATUS_FILE, "w", encoding="utf-8") as f:
+        f.write("{}")
+    hooks.unsetup()
+    assert not os.path.exists(hooks.ANTIGRAVITY_STATUSLINE_HOOK_PATH)
+    assert not os.path.exists(hooks.ANTIGRAVITY_STATUS_FILE)
+    restored = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert restored["model"] == "auto"
+    assert restored["statusLine"] == original_sl
+
+
+def test_antigravity_needs_update_and_update_hook_v6_gate(tmp_path, monkeypatch):
+    agy_dir = _antigravity_only_home(tmp_path, monkeypatch)
+    settings_path = agy_dir / "settings.json"
+    settings_path.write_text(json.dumps({"colorScheme": "dark"}), encoding="utf-8")
+
+    config.save_setup_version(5)
+    config.save_antigravity_statusline(True)
+    assert not hooks.needs_update()  # < 6 门控
+
+    config.save_setup_version(6)
+    assert hooks.needs_update()  # 未装 → 待更新
+    hooks.update_hook()
+    assert not hooks.needs_update()
+    assert hooks.antigravity_statusline_active() is True
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["colorScheme"] == "dark"
+
+    # 脚本版本落后 → needs_update 检出并收敛
+    script = tmp_path / "_tt" / "antigravity-statusline.py"
+    script.write_text(
+        script.read_text(encoding="utf-8").replace(hooks.ANTIGRAVITY_STATUSLINE_HOOK_VERSION, "0.1"),
+        encoding="utf-8",
+    )
+    assert hooks.needs_update()
+    hooks.update_hook()
+    assert not hooks.needs_update()
+
+
+def test_ask_components_antigravity_question(monkeypatch):
+    from token_tracker import wizard
+    asked: list = []
+    monkeypatch.setattr(wizard, "_has_cc", lambda: False)
+    monkeypatch.setattr(wizard, "_has_codex", lambda: False)
+    monkeypatch.setattr(wizard, "_has_kimi", lambda: False)
+    monkeypatch.setattr(wizard, "_has_antigravity", lambda: True)
+    monkeypatch.setattr(wizard, "recommended_components",
+                        lambda: hooks.SetupComponents(antigravity_statusline=False))
+    monkeypatch.setattr(wizard, "_ask_yes_no",
+                        lambda message, default: asked.append((message, default)) or default)
+    c = wizard.ask_components(step_prefix_fn=lambda i: f"[{i}] ")
+    assert [d for _, d in asked] == [False]
+    assert asked[0][0].startswith("[1] ")
+    assert c.antigravity_statusline is False

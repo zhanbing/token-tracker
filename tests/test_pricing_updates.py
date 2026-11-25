@@ -225,6 +225,61 @@ def test_new_builtin_models_have_short_names():
         "gpt-6.1-sol", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-mythos-5-1",
         "glm-5.2", "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "qwen3.6-plus", "qwen3.7-plus",
         "qwen3-coder-flash", "MiniMax-M2.1-highspeed", "MiniMax-M2.5-highspeed", "MiniMax-M2.7-highspeed",
-        "mimo-v2.6-pro", "mimo-v2.6-flash", "gemini-3.6-flash", "gemini-3.8-flash",
+        "mimo-v2.6-pro", "mimo-v2.6-flash", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash",
+        "gemini-4-argon", "gemini-4-carbon", "gemini-4-neon", "gemini-4-hydrogen",
     ):
         assert model in MODEL_SHORT
+
+
+@pytest.mark.parametrize("model, rates", [
+    ("gemini-4-neon", (3.0, 15.0, 0.15)),
+    ("gemini-4-neon-xhigh", (3.0, 15.0, 0.15)),
+    ("gemini-4-neon-high", (3.0, 15.0, 0.15)),
+    ("gemini-4-hydrogen", (1.5, 7.5, 0.075)),
+    ("gemini-4-hydrogen-xhigh", (1.5, 7.5, 0.075)),
+    ("gemini-3.5-flash", (1.5, 9.0, 0.15)),
+])
+def test_gemini_4_and_35_builtin_prices_and_effort_suffixes(model, rates):
+    usage = entry(model, input_tokens=1_000_000, output_tokens=1_000_000, cache_read_tokens=1_000_000)
+    assert cost.calculate_cost(usage) == pytest.approx(sum(rates))
+
+
+@pytest.mark.parametrize("model", ["gemini-4-argon", "gemini-4-carbon", "gemini-4-carbon-xhigh"])
+@pytest.mark.parametrize("timestamp, multiplier", [
+    (datetime(2026, 11, 30, 23, 59, 59, tzinfo=UTC), 1),
+    (datetime(2026, 12, 1, 0, 0, 0, tzinfo=UTC), 2),
+    (datetime(2026, 12, 1, 8, 0, 0, tzinfo=timezone(timedelta(hours=8))), 2),
+])
+def test_gemini_4_argon_carbon_intro_cutover_preserves_history(model, timestamp, multiplier):
+    # 即使在线表已切到 12 月标准价，11 月历史请求仍按导入价 $2/$10/$0.10 计算。
+    cost._pricing["gemini-4-carbon"] = cost._usd(4.0, 20.0, 0.2)
+    cost._pricing["gemini-4-argon"] = cost._usd(4.0, 20.0, 0.2)
+    usage = entry(model, timestamp=timestamp, input_tokens=1_000, output_tokens=1_000, cache_read_tokens=1_000)
+    assert cost.calculate_cost(usage) == pytest.approx(0.0121 * multiplier)
+
+
+@pytest.mark.parametrize("extra, rates", [(0, (2.0, 12.0, 0.2)), (1, (4.0, 18.0, 0.4))])
+def test_gemini_31_pro_200k_tier(extra, rates):
+    usage = entry("gemini-3.1-pro-preview", input_tokens=180_000 + extra, output_tokens=1_000, cache_read_tokens=20_000)
+    expected = (usage.input_tokens * rates[0] + 1_000 * rates[1] + 20_000 * rates[2]) * 1e-6
+    assert cost.calculate_cost(usage) == pytest.approx(expected)
+
+
+def test_gemini_official_provider_prefix_and_no_fuzzy_match(monkeypatch):
+    # LiteLLM 仅有 gemini/<model> 键时，裸模型与带 -effort 后缀可按官方 gemini/ 前缀锚定命中；
+    # 相似模型名（无 "-" 边界）和第三方前缀禁止模糊命中。
+    monkeypatch.setattr(cost, "_pricing", {"gemini/gemini-4-sample": cost._usd(3.0, 15.0, 0.15)})
+    monkeypatch.setattr(cost, "_model_key_cache", {})
+    assert cost._resolve_model_key_uncached("gemini-4-sample", cost._pricing) == "gemini/gemini-4-sample"
+    assert cost._resolve_model_key_uncached("gemini-4-sample-xhigh", cost._pricing) == "gemini/gemini-4-sample"
+    assert cost._resolve_model_key_uncached("gemini-4-sample2", cost._pricing) is None
+    assert cost._resolve_model_key_uncached("third-party/gemini-4-sample", cost._pricing) is None
+
+
+def test_model_short_strips_antigravity_effort_suffixes():
+    from token_tracker.ui.format import _model_short
+
+    assert _model_short("gemini-4-neon-xhigh") == "Gemini 4 Neon"
+    assert _model_short("gemini-4-carbon-high") == "Gemini 4 Carbon"
+    assert _model_short("gemini-4-hydrogen-low") == "Gemini 4 Hydro"
+    assert _model_short("gemini/gemini-4-argon") == "Gemini 4 Argon"

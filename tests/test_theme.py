@@ -204,10 +204,13 @@ def test_should_run_wizard(monkeypatch):
 
 def test_in_agent_session_env_uses_only_hard_signals(monkeypatch):
     # 回归：kimi 目录启发式命中（同项目目录有活跃 kimi 会话）不得影响 wizard 判定
-    for var in ("CODEX_THREAD_ID", "CODEX_SANDBOX", "CLAUDECODE"):
+    for var in ("CODEX_THREAD_ID", "CODEX_SANDBOX", "CLAUDECODE", "ANTIGRAVITY_AGENT", "ANTIGRAVITY_CONVERSATION_ID"):
         monkeypatch.delenv(var, raising=False)
     assert cli._in_agent_session_env() is False
     monkeypatch.setenv("CLAUDECODE", "1")
+    assert cli._in_agent_session_env() is True
+    monkeypatch.delenv("CLAUDECODE")
+    monkeypatch.setenv("ANTIGRAVITY_AGENT", "1")
     assert cli._in_agent_session_env() is True
 
 
@@ -284,6 +287,7 @@ def test_run_wizard_saves_theme(tmp_path, monkeypatch):
     monkeypatch.setattr(wizard, "_has_cc", lambda: True)
     monkeypatch.setattr(wizard, "_has_codex", lambda: True)
     monkeypatch.setattr(wizard, "_has_kimi", lambda: False)
+    monkeypatch.setattr(wizard, "_has_antigravity", lambda: False)
     selects = iter(["zh", "nord", "Yes", "Yes"])
     monkeypatch.setattr("questionary.select", lambda *a, **k: _FakeQ(next(selects)))
     monkeypatch.setattr(wizard, "setup", lambda **kw: None)  # 不真落地配置

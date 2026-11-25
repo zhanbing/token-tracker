@@ -1,6 +1,6 @@
 # Token Tracker
 
-Track token usage across local AI agents. Supports **Claude Code**, **Codex**, and **Kimi Code**.
+Track token usage across local AI agents. Supports **Claude Code**, **Codex**, **Kimi Code**, and **Antigravity**.
 
 Custom StatusLine integration + CLI Dashboard — see token usage, cost, and rate limits at a glance.
 
@@ -12,20 +12,20 @@ Custom StatusLine integration + CLI Dashboard — see token usage, cost, and rat
 
 ## Highlights
 
-- **Unified multi-agent tracking** — Claude Code + Codex + Kimi Code in one place, grouped by source
-- **Status line integration** -- Claude Code via the official StatusLine API; Codex via a Stop hook that appends two lines of plain-text usage status; Kimi Code via the official `status_line` API
-- **Live sidebar** — `tt sidebar` shows all active sessions (Claude Code + Codex + Kimi Code); `$tt-sidebar` in Codex or `/skill:tt-sidebar` in Kimi Code opens a current-session-only pane on the right at one-third width
+- **Unified multi-agent tracking** — Claude Code + Codex + Kimi Code + Antigravity in one place, grouped by source
+- **Status line integration** -- Claude Code & Antigravity via their official `statusLine` APIs; Codex via a Stop hook that appends two lines of plain-text usage status; Kimi Code via the official `status_line` API
+- **Live sidebar** — `tt sidebar` shows all active sessions (Claude Code + Codex + Kimi Code + Antigravity); `$tt-sidebar` in Codex or `/skill:tt-sidebar` in Kimi Code opens a current-session-only pane on the right at one-third width
 - **Rate limit monitoring** — real-time 5h / 7d quota usage with reset countdown
 - **Multi-dimensional cost analysis** — per-session, daily, weekly, monthly cost breakdown
-- **Pricing resolution** -- LiteLLM live pricing + built-in official-price fallback, including GPT-6.1 Sol / GPT-6, Claude Opus 5.5 / Sonnet 5.5 / Haiku 5.5 / Fable 5.1 / Mythos 5.1, Gemini 3.8 Flash, Grok 4.7, and major Chinese models (Kimi / GLM / Qwen / Doubao / DeepSeek / MiniMax / MiMo); supports LiteLLM tier tables and calculates long-context and DeepSeek peak/off-peak rates per request (weekends and included Chinese public holidays are fully off-peak), with separate Codex cache-read and cache-write pricing. Unknown models use known family rates where available; unresolved models emit a missing-price warning
+- **Pricing resolution** -- LiteLLM live pricing + built-in official-price fallback, including GPT-6.1 Sol / GPT-6, Claude Opus 5.5 / Sonnet 5.5 / Haiku 5.5 / Fable 5.1 / Mythos 5.1, Gemini 4 (Argon / Carbon / Neon / Hydrogen) / Gemini 3.8 Flash, Grok 4.7, and major Chinese models (Kimi / GLM / Qwen / Doubao / DeepSeek / MiniMax / MiMo); supports LiteLLM tier tables and calculates long-context and DeepSeek peak/off-peak rates per request (weekends and included Chinese public holidays are fully off-peak), with separate Codex cache-read and cache-write pricing. Unknown models use known family rates where available; unresolved models emit a missing-price warning
 - **Session insights** — project, model, duration, message count per session
-- **Unified multi-theme** -- 6 themes (Catppuccin family + Nord + Dracula) shared across CLI reports and the Claude Code / Kimi Code status lines; switch with `tt theme`. Codex hook status remains plain text
+- **Unified multi-theme** -- 6 themes (Catppuccin family + Nord + Dracula) shared across CLI reports and the Claude Code / Kimi Code / Antigravity status lines; switch with `tt theme`. Codex hook status remains plain text
 - **Zero config** — auto-detects installed agents, reads local data directly
 - **Privacy first** — all data stays local, no collection or upload
 
 ## StatusLine
 
-`tt setup` auto-configures status lines for Claude Code, Codex, and Kimi Code, auto-upgraded when the script updates.
+`tt setup` auto-configures status lines for Claude Code, Codex, Kimi Code, and Antigravity, auto-upgraded when the script updates.
 
 ### Claude Code (official API)
 
@@ -81,6 +81,16 @@ Built on Kimi Code's official `status_line` API (`tui.toml`) — a single trueco
 - Project / branch / model / permission mode come from Kimi's official snapshot (the snapshot has no thinking-effort field — effort is read from the actual `thinkingEffort` of requests in the session wire); the branch segment's uncommitted +/− line counts and untracked files are computed via `git diff --numstat` + `git ls-files` (same as the CC status line); Total and Cost are accumulated **incrementally** from the session's `wire.jsonl` by the status-line script (offset-cached, only new bytes are read per run), priced with the built-in official Kimi rates
 - Fully supported on macOS / Linux / Windows (Windows console GBK encoding and background-process detaching are both handled)
 - An existing custom `status_line.command` is never overwritten by default (the wizard also lets you opt out); `tt unsetup` restores the exact prior state
+
+### Antigravity (official API)
+
+Built on the Antigravity CLI official `statusLine` API (`~/.gemini/antigravity-cli/settings.json`) — a 4-row truecolor layout matching the Claude Code style and active theme (auto-falls back to 256 colors when truecolor is unavailable):
+
+- **L1** `[project](branch* +A -D ?U) | Total: <session tokens> | Cost: $<estimated cost>` (session totals are accumulated incrementally from `transcript.jsonl` by byte offset)
+- **L2** `Limit: 5h: <bar> (reset) | 7d: <bar> (reset) | <window> Ctx: <bar>` (quota comes from the official `quota` stdin payload and is cached locally for `tt status`)
+- **L3** `Tokens: in X, out Y, cache Z` (current context breakdown)
+- **L4** `Model: <model>/<effort>/<mode> | Duration: <elapsed> | Plan: <tier>`
+- Also records terminal pane mappings for `tt sidebar` click-to-jump (iTerm2 / tmux); existing custom `statusLine` configs are never overwritten by default, backed up when explicitly taken over, and restored on `tt unsetup`
 
 ## Live Sidebar
 
@@ -142,13 +152,13 @@ tt unsetup        # uninstall and restore previous config
 tt --version      # show version (-v / -V)
 ```
 
-> In multi-agent setups, add `--claude` / `--codex` / `--kimi` (mutually exclusive) to filter any report to a single agent — works for `status` / `daily` / `weekly` / `monthly` / `sessions`. E.g. `tt daily --kimi` renders only the Kimi Code heatmap. Inside an agent session, `daily` / `weekly` already auto-follow the current agent; the explicit flag overrides that.
+> In multi-agent setups, add `--claude` / `--codex` / `--kimi` / `--antigravity` (or `--agy`) (mutually exclusive) to filter any report to a single agent — works for `status` / `daily` / `weekly` / `monthly` / `sessions` / `sidebar`. E.g. `tt daily --agy` renders only the Antigravity heatmap. Inside an agent session, `daily` / `weekly` already auto-follow the current agent; the explicit flag overrides that.
 
 > 💡 `tt daily` is a GitHub-style token contribution heatmap (shaded green cells). In a Claude Code session, type `!tt daily` to see it in full color — commands you run yourself with `!` have their 24-bit true-color output rendered.
 
 ## Color Themes
 
-6 built-in themes, **shared** across CLI reports and the Claude Code / Kimi Code status lines; Codex hook status remains plain text:
+6 built-in themes, **shared** across CLI reports and the Claude Code / Kimi Code / Antigravity status lines; Codex hook status remains plain text:
 
 ![Supported themes](assets/screenshot-themes.png)
 
@@ -180,6 +190,7 @@ The first time you run `tt` (or run `tt setup` in a standalone terminal), an **i
 3. **Take over Claude Code status line** — Yes/No (only when Claude Code is detected; an existing custom statusLine is backed up first, and picking No leaves it untouched)
 4. **Enable Codex faux statusline** — Yes/No (only when Codex is detected)
 5. **Enable Kimi Code status line** — Yes/No (only when Kimi Code is detected; an existing custom `status_line.command` is never overwritten by default)
+6. **Take over Antigravity status line** — Yes/No (only when Antigravity is detected; an existing custom `statusLine` is backed up first and never replaced by default)
 
 CI / non-tty environments (Docker / scripts / `curl|bash`) auto-install with **recommended defaults**: language follows the system setting, theme mocha, components on by default but **an existing custom statusLine is never replaced**. To change anything later, just run `tt setup` again.
 
@@ -201,8 +212,9 @@ Available sort fields: `tokens` / `cost` / `messages` / `time` / `input` / `outp
 | Claude Code | `~/.claude/projects/*/` | JSONL (per-message usage) |
 | Codex | `~/.codex/sessions/` | JSONL + SQLite |
 | Kimi Code | `~/.kimi-code/sessions/` | wire JSONL (per-turn increments) |
+| Antigravity | `~/.gemini/antigravity-cli/brain/` | transcript JSONL + SQLite |
 
-Cross-platform paths: on Windows `~` resolves to `%USERPROFILE%`. Honors `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `KIMI_CODE_HOME` (the official custom-directory env vars) when set.
+Cross-platform paths: on Windows `~` resolves to `%USERPROFILE%`. Honors `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `KIMI_CODE_HOME` / `ANTIGRAVITY_APP_DATA_DIR` (or `ANTIGRAVITY_HOME` / `AGY_HOME`) when set.
 
 Token Tracker is **read-only** — it never modifies any agent data.
 
